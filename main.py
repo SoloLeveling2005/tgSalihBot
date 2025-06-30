@@ -330,7 +330,7 @@ async def main():
     async def cmd_publish_report(message: types.Message):
         if message.bot:
             await message.answer("Публикую отчет…")
-            await send_reports(message.bot)
+            await send_reports(message, message.bot)
             await message.answer("Отчет опубликован.", reply_markup=get_main_menu_kb())
 
     @dp.message(F.text == "Обновить отчёт 'Отчет о наличии'")
@@ -339,7 +339,7 @@ async def main():
     async def cmd_update_report(message: types.Message):
         if message.bot:
             await message.answer("Обновляю…")
-            await update_reports(message.bot)
+            await update_reports(message, message.bot)
             await message.answer("Готово.", reply_markup=get_main_menu_kb())
 
     @dp.message(F.text == "Опубликовать отчет 'Отправление в общую'")

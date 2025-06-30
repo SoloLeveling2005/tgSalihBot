@@ -62,7 +62,6 @@ async def send_general(bot: Bot, chat_id: int, thread_id: int | None = None) -> 
             parse_mode="HTML",
             message_thread_id=thread_id
         )
-        print(first_txt)
         await asyncio.sleep(1)
 
     for row in rows:
@@ -88,9 +87,6 @@ async def send_general(bot: Bot, chat_id: int, thread_id: int | None = None) -> 
                 message_thread_id=thread_id
             )
 
-        print('---------------------------')
-        print(caption)
-        print('---------------------------')
         await asyncio.sleep(1)
 
     if last_txt:
@@ -100,4 +96,3 @@ async def send_general(bot: Bot, chat_id: int, thread_id: int | None = None) -> 
             parse_mode="HTML",
             message_thread_id=thread_id
         )
-        print(last_txt)

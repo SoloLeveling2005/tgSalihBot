@@ -40,33 +40,33 @@ LOCATIONS = {
             "outro": "O3",
         }
     },
-    "samara": {
-        "ru": "Самара",
-        "variants_ru": ["самар", "самаре"],
+    "tomsk": {
+        "ru": "Томск",
+        "variants_ru": ["томск"],
         "exel": {
             "intro": "P2",
             "outro": "P3",
         }
     },
-    "krasnodar": {
-        "ru": "Краснодар",
-        "variants_ru": ["краснод", "краснодаре"],
+    "omsk": {
+        "ru": "Омск",
+        "variants_ru": ["омск"],
         "exel": {
             "intro": "Q2",
             "outro": "Q3",
         }
     },
-    "ekaterinburg": {
-        "ru": "Екатеринбург",
-        "variants_ru": ["екатерен", "екатерин"],
+    "barnaul": {
+        "ru": "Барнаул",
+        "variants_ru": ["барнаул"],
         "exel": {
             "intro": "R2",
             "outro": "R3",
         }
     },
-    "moscow_dzerzhinsky": {
-        "ru": "Москва (Дзержинский)",
-        "variants_ru": ["москва (дзержинский)"],
+    "cheboksary": {
+        "ru": "Чебоксары",
+        "variants_ru": ["чебокс"],
         "exel": {
             "intro": "S2",
             "outro": "S3",
@@ -75,10 +75,10 @@ LOCATIONS = {
 }
 
 def detect_location_slug(text: str) -> str | None:
-    """Определяет, упоминается ли какой-либо место в строке (в любом месте)."""
-    text = text.lower()
+    """Определяет локацию, если её вариант стоит в начале строки (без учёта регистра)."""
+    text = text.lower().lstrip()
     for slug, cfg in LOCATIONS.items():
-        if any(v in text for v in cfg["variants_ru"]):
+        if any(text.startswith(v) for v in cfg["variants_ru"]):
             return slug
     return None
 
@@ -87,16 +87,31 @@ def detect_location_slug(text: str) -> str | None:
 # === Хранение message_id для редактирования сообщений после перезапуска ===
 
 REPORT_FILE = Path("report_data.json")
+INIT_REPORT_DATA = {slug: [] for slug in LOCATIONS}
+INIT_REPORT_DATA['all'] = []
 
-def load_report_data() -> dict[str, int]:
-    """Загружает message_id по каждому городу из файла."""
+def load_report_data() -> dict[str, list[int]]:
+    """Загружает message_id по каждому городу и для 'all' из файла."""
     if REPORT_FILE.exists():
-        return json.loads(REPORT_FILE.read_text(encoding="utf-8"))
-    return {}
+        try:
+            data = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
+            result = {slug: list(map(int, data.get(slug, []))) for slug in LOCATIONS}
+            result['all'] = list(map(int, data.get('all', [])))
+            return result
+        except Exception:
+            pass
+    return INIT_REPORT_DATA.copy()
 
-def save_report_data(data: dict[str, int]) -> None:
-    """Сохраняет message_id по каждому городу в файл."""
-    REPORT_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def save_report_data(data: dict[str, list[int]]) -> None:
+    """Сохраняет message_id по каждому городу и для 'all' в файл без дубликатов."""
+    norm = {slug: sorted(set(data.get(slug, []))) for slug in LOCATIONS}
+    norm['all'] = sorted(set(data.get('all', [])))
+    REPORT_FILE.write_text(
+        json.dumps(norm, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
 
 # === ===
 
@@ -232,11 +247,6 @@ class Mark2:
         return f"[{cls.escape(text)}]({cls.escape(url)})"
 
 
-async def publish_reports(bot: Bot) -> None:
-    # сбросим старые IDs, чтобы сделать «новую публикацию»
-    save_report_data({})
-    await update_reports(bot)
-
 def text_new_line(existing: str, addition: str) -> str:
         """Добавляет строку к существующей с двумя переносами, если обе непустые."""
         if not addition.strip():
@@ -260,132 +270,155 @@ def split_text_safe(text: str, limit: int = 1024) -> list[str]:
         parts.append(current.rstrip())
     return parts
 
-async def update_reports(bot: Bot, type_='create') -> None:
-    df = fetch_csv_df()
-    report_data = parse_stock_data_from_csv(df)
-    emojis = ['🚀🚀🚀🚀🚀🚀', '🔥🔥🔥🔥🔥🔥']
-    thread_id = CHAT_PUBLIC_ID
+async def update_reports(
+    message: types.Message | None,
+    bot: Bot,
+    type_: str = "create",
+) -> None:
+    """
+    create  – публикуем новый отчёт, предварительно удаляя все старые сообщения  
+    update  – логика обновления при необходимости (не реализована здесь)
+    """
+    # ---------- 1. Удаляем старые публикации ----------
+    store = load_report_data()          # {slug: [...], "all": [...]}
 
+    if type_ == "create" or type_ == "update":
+        ids_to_delete: set[int] = {
+            mid for lst in store.values() for mid in lst
+        }
+        if ids_to_delete:
+            for mid in sorted(ids_to_delete, reverse=True):
+                try:
+                    await bot.delete_message(chat_id=CHAT_ID, message_id=mid)
+                    await asyncio.sleep(0.05)        # бережём rate-limit
+                except Exception:
+                    pass                             # сообщение уже удалено/недоступно
+
+            # обнуляем хранилище и сохраняем
+            store = {slug: [] for slug in LOCATIONS}
+            store["all"] = []
+            save_report_data(store)
+
+    # ---------- 2. Готовим данные ----------
+    df         = fetch_csv_df()
+    stock      = parse_stock_data_from_csv(df)
     begin_text = get_excel_cell_value(df, BEGIN_PUBLICATION_CELL)
-    finish_text = get_excel_cell_value(df, FINISH_PUBLICATION_CELL)
+    finish_text= get_excel_cell_value(df, FINISH_PUBLICATION_CELL)
+    emojis     = ['🚀🚀🚀🚀🚀🚀', '🔥🔥🔥🔥🔥🔥']
+    thread_id  = CHAT_PUBLIC_ID
 
-    if begin_text:
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=Mark2.escape(begin_text),
-            parse_mode="MarkdownV2",
-            message_thread_id=thread_id
-        )
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=random.choice(emojis),
-            parse_mode="MarkdownV2",
-            message_thread_id=thread_id
-        )
-
-    for idx, (slug, cfg) in enumerate(LOCATIONS.items(), start=1):
-        thread_id = CHAT_PUBLIC_ID
-        city_name = cfg["ru"]
-        intro = report_data[slug]["intro"]
-        outro = report_data[slug]["outro"]
-
-        intro_part = f"\n\n{intro}" if intro else ""
-        parts = [Mark2.bold(f"Отчёт по складу ({city_name}){intro_part}")]
-        images = []
-
-        for section, title in (("availability", "Наличие:"), ("onTheWay", "В пути:")):
-            items = report_data[slug][section]["list"]
-            if not items:
-                continue
-            parts.append(Mark2.bold(title))
-            for item in items:
-                name = item["name"]
-                link = item["link"]
-                desc = item["desc"]
-                reviews = item["reviews"]
-                price_avail = item["price_avail"]
-                price_order = item["price_order"]
-                link_order = item["link_order"]
-                arrival = item["arrival"]
-                images.extend(item.get("images", []))
-
-                if link:
-                    line = Mark2.link(name, link)
-                else:
-                    line = Mark2.escape(name)
-                    
-                if desc:
-                    line += f" {Mark2.escape(desc)}"
-
-                if reviews:
-                    line += f" {Mark2.link('Отзывы', reviews)}"
-
-                if price_avail:
-                    line += f" Цена {Mark2.escape(price_avail)}"
-
-                if link_order and price_order:
-                    line += f" {Mark2.link(f'Под заказ {price_order}', link_order)}"
-                elif link_order:
-                    line += f" {Mark2.link('Под заказ', link_order)}"
-                elif price_order:
-                    line += f" Под заказ {Mark2.escape(price_order)}"
-
-                if arrival:
-                    line += f"\n{Mark2.escape(f'Прибытие {arrival}')}"
-
-                parts.append(line)
-
-        parts.append(Mark2.escape(outro))
-        full_text = "\n\n".join(parts)
-
-        if images:
-            caption_chunk, *rest_chunks = split_text_safe(full_text, limit=1024)
-            media_group = [
-                types.InputMediaPhoto(media=images[0], caption=caption_chunk, parse_mode="MarkdownV2")
-            ]
-            for url in images[1:10]:
-                media_group.append(types.InputMediaPhoto(media=url))
-            await bot.send_media_group(
-                chat_id=CHAT_ID,
-                media=media_group,
-                message_thread_id=thread_id
+    # ---------- 3. Публикация (type_ == "create") ----------
+    if type_ == "create" or type_ == "update":
+        # —– начало блока
+        if begin_text:
+            msg = await bot.send_message(
+                CHAT_ID, Mark2.escape(begin_text),
+                parse_mode="MarkdownV2", message_thread_id=thread_id
             )
+            store["all"].append(msg.message_id)
 
-            # пересобрать остаток текста в один блок и порезать по 4096
-            remaining_text = "\n".join(rest_chunks)
-            text_chunks = split_text_safe(remaining_text, limit=4096)
-        else:
-            text_chunks = split_text_safe(full_text, limit=4096)
-
-        for chunk in text_chunks:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=chunk,
-                parse_mode="MarkdownV2",
-                message_thread_id=thread_id
+            msg = await bot.send_message(
+                CHAT_ID, random.choice(emojis),
+                parse_mode="MarkdownV2", message_thread_id=thread_id
             )
-            await asyncio.sleep(0.5)
+            store["all"].append(msg.message_id)
 
-        if idx < len(LOCATIONS):
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=random.choice(emojis),
-                parse_mode="MarkdownV2",
-                message_thread_id=thread_id
+        # —– города
+        for idx, (slug, cfg) in enumerate(LOCATIONS.items(), start=1):
+            city_name = cfg["ru"]
+            intro     = stock[slug]["intro"]
+            outro     = stock[slug]["outro"]
+
+            parts: list[str] = [Mark2.bold(f"Отчёт по складу ({city_name})")]
+            if intro:
+                parts.append(Mark2.escape(intro))
+
+            images: list[str] = []
+            for section, title in (("availability", "Наличие:"), ("onTheWay", "В пути:")):
+                items = stock[slug][section]["list"]
+                if not items:
+                    continue
+                parts.append(Mark2.bold(title))
+                for it in items:
+                    line = Mark2.link(it["name"], it["link"]) if it["link"] else Mark2.escape(it["name"])
+                    if it["desc"]:
+                        line += f" {Mark2.escape(it['desc'])}"
+                    if it["reviews"]:
+                        line += f" {Mark2.link('Отзывы', it['reviews'])}"
+                    if it["price_avail"]:
+                        line += f" Цена {Mark2.escape(it['price_avail'])}"
+                    if it["link_order"] and it["price_order"]:
+                        order_text = f"Под заказ {it['price_order']}"
+                        line += f" {Mark2.link(order_text, it['link_order'])}"
+                    elif it["link_order"]:
+                        line += f" {Mark2.link('Под заказ', it['link_order'])}"
+                    elif it["price_order"]:
+                        line += f" Под заказ {Mark2.escape(it['price_order'])}"
+                    if it["arrival"]:
+                        arrival_text = f"Прибытие {it['arrival']}"
+                        line += f"\n{Mark2.escape(arrival_text)}"
+                    parts.append(line)
+                    images.extend(it["images"])
+
+            if outro:
+                parts.append(Mark2.escape(outro))
+
+            full_text = "\n\n".join(parts)
+
+            # --- публикация с картинками / без
+            if images:
+                cap, *rest = split_text_safe(full_text, 1024)
+                media = [types.InputMediaPhoto(
+                    media=images[0],
+                    caption=cap,
+                    parse_mode="MarkdownV2"
+                )]
+                media += [types.InputMediaPhoto(media=u) for u in images[1:10]]
+                msgs = await bot.send_media_group(CHAT_ID, media, message_thread_id=thread_id)
+                store[slug].extend(m.message_id for m in msgs)
+
+                remaining = "\n".join(rest)
+                chunks = split_text_safe(remaining, 4096)
+            else:
+                chunks = split_text_safe(full_text, 4096)
+
+            for txt in chunks:
+                msg = await bot.send_message(
+                    CHAT_ID, txt, parse_mode="MarkdownV2", message_thread_id=thread_id
+                )
+                store[slug].append(msg.message_id)
+                await asyncio.sleep(0.5)
+
+            # разделитель
+            if idx < len(LOCATIONS):
+                msg = await bot.send_message(
+                    CHAT_ID, random.choice(emojis),
+                    parse_mode="MarkdownV2", message_thread_id=thread_id
+                )
+                store["all"].append(msg.message_id)
+
+        # —– конец блока
+        if finish_text:
+            msg = await bot.send_message(
+                CHAT_ID, Mark2.escape(finish_text),
+                parse_mode="MarkdownV2", message_thread_id=thread_id
             )
+            store["all"].append(msg.message_id)
 
-    if finish_text:
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=Mark2.escape(finish_text),
-            parse_mode="MarkdownV2",
-            message_thread_id=thread_id
-        )
+        save_report_data(store)
+
+    # ---------- 4. Обновление (type_ == "update") ----------
+    else:
+        if all(not store[s] for s in LOCATIONS):
+            await message.answer("Обновление невозможно. Публикаций не найдено.")
+            return
+        # (допишите логику при необходимости)
 
 
 # для совместимости: если где-то ещё зовётся send_reports
-async def send_reports(bot: Bot):
-    await update_reports(bot, type_='create')
+async def send_reports(message: types.Message, bot: Bot):
+    await update_reports(message, bot, type_='create')
 
-# if __name__ == "__main__":
-#     asyncio.run(update_reports(bot=None))
+if __name__ == "__main__":
+    # asyncio.run(update_reports(bot=None))
+    print(load_report_data())
